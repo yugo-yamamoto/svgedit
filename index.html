@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SVG エディタ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>SVG エディタ</h1>
+  <div class="tools">
+    <button class="tool active" id="btnSelect" data-tool="select" title="選択 / 移動 (V)">▶ 選択</button>
+    <button class="tool" id="btnRect" data-tool="rect" title="長方形 (R)">▭ 長方形</button>
+    <button class="tool" id="btnLine" data-tool="line" title="直線 (L)">／ 直線</button>
+    <button class="tool" id="btnText" data-tool="text" title="テキスト (T)">Ｔ テキスト</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="tools">
+    <button id="btnUndo" title="元に戻す (Ctrl+Z)">↶ 元に戻す</button>
+    <button id="btnRedo" title="やり直し (Ctrl+Shift+Z)">↷ やり直し</button>
+    <button id="btnFront" title="最前面へ">⬆ 前面</button>
+    <button id="btnBack" title="最背面へ">⬇ 背面</button>
+    <button id="btnDup" title="複製 (Ctrl+D)">⧉ 複製</button>
+    <button id="btnDelete" class="danger" title="削除 (Delete)">🗑 削除</button>
+  </div>
+</header>
+
+<div class="main">
+  <!-- ================= 左パネル ================= -->
+  <aside class="panel left">
+    <section>
+      <h2>キャンバス</h2>
+      <div class="row"><label>幅</label><input type="number" id="canvasW" value="800" min="1" max="8000"><span class="unit">px</span></div>
+      <div class="row"><label>高さ</label><input type="number" id="canvasH" value="600" min="1" max="8000"><span class="unit">px</span></div>
+      <div class="row"><label>背景色</label><input type="color" id="bgColor" value="#ffffff"></div>
+      <div class="row"><label>透明背景</label><input type="checkbox" id="bgTransparent"></div>
+      <div class="row"><label>グリッド</label><input type="checkbox" id="gridChk" checked></div>
+      <div class="row"><label>スナップ</label><input type="checkbox" id="snapChk"></div>
+      <div class="row"><label>グリッド幅</label><input type="number" id="gridSize" value="20" min="2" max="200"><span class="unit">px</span></div>
+      <div class="row"><label>表示倍率</label><input type="range" id="zoom" min="10" max="300" value="100"><span class="unit" id="zoomLabel">100%</span></div>
+    </section>
+
+    <section id="secShape">
+      <h2>図形（長方形 / 直線）</h2>
+      <div class="row"><label>塗り</label><input type="color" id="fillColor" value="#4a90d9"><input type="checkbox" id="fillNone"><span class="unit">なし</span></div>
+      <div class="row"><label>線色</label><input type="color" id="strokeColor" value="#1f3b57"><input type="checkbox" id="strokeNone"><span class="unit">なし</span></div>
+      <div class="row"><label>線幅</label><input type="number" id="strokeWidth" value="2" min="0" max="200" step="0.5"><span class="unit">px</span></div>
+      <div class="row"><label>角丸</label><input type="number" id="rectRadius" value="0" min="0" max="500" step="1"><span class="unit">px</span></div>
+      <div class="row"><label>線種</label>
+        <select id="dashStyle">
+          <option value="">実線</option>
+          <option value="8 6">破線</option>
+          <option value="2 6">点線</option>
+          <option value="12 5 3 5">一点鎖線</option>
+        </select>
+      </div>
+    </section>
+
+    <section id="secText">
+      <h2>テキスト</h2>
+      <div class="row col"><label>文字列（改行可）</label><textarea id="txtContent" rows="3">テキスト</textarea></div>
+      <div class="row"><label>フォント</label>
+        <select id="fontFamily">
+          <optgroup label="Windows">
+            <option value="'游ゴシック', 'Yu Gothic', YuGothic, sans-serif">游ゴシック</option>
+            <option value="'游ゴシック体', 'YuGothic', 'Yu Gothic', sans-serif">游ゴシック体</option>
+            <option value="Meiryo, 'メイリオ', sans-serif">メイリオ</option>
+            <option value="'BIZ UDGothic', 'BIZ UDゴシック', sans-serif">BIZ UDゴシック</option>
+            <option value="'BIZ UDPGothic', 'BIZ UDPゴシック', sans-serif">BIZ UDP ゴシック</option>
+            <option value="'游明朝', 'Yu Mincho', YuMincho, serif">游明朝</option>
+            <option value="'BIZ UDMincho', 'BIZ UD明朝', serif">BIZ UD明朝</option>
+            <option value="'MS Gothic', 'ＭＳ ゴシック', monospace">ＭＳ ゴシック</option>
+            <option value="'MS Mincho', 'ＭＳ 明朝', serif">ＭＳ 明朝</option>
+            <option value="'HGMaruGothicMPRO', 'HG丸ｺﾞｼｯｸM-PRO', sans-serif">HG丸ゴシックM-PRO（要 Office）</option>
+          </optgroup>
+          <optgroup label="macOS / iPhone / iPad">
+            <option value="'Hiragino Sans', 'ヒラギノ角ゴシック', 'Hiragino Kaku Gothic ProN', 'ヒラギノ角ゴ ProN W3', sans-serif">ヒラギノ角ゴシック</option>
+            <option value="'Hiragino Maru Gothic ProN', 'ヒラギノ丸ゴ ProN W4', sans-serif">ヒラギノ丸ゴ</option>
+            <option value="'Hiragino Mincho ProN', 'ヒラギノ明朝 ProN W3', serif">ヒラギノ明朝</option>
+            <option value="'Toppan Bunkyu Gothic', '凸版文久ゴシック', sans-serif">凸版文久ゴシック</option>
+            <option value="'Toppan Bunkyu Mincho', '凸版文久明朝', serif">凸版文久明朝</option>
+            <option value="'Klee One', 'Klee', 'クレー', serif">クレー（Klee）</option>
+          </optgroup>
+          <optgroup label="Android">
+            <option value="'Noto Sans CJK JP', 'Noto Sans JP', 'Droid Sans Japanese', sans-serif">Noto Sans（ゴシック）</option>
+            <option value="'Noto Serif CJK JP', 'Noto Serif JP', serif">Noto Serif（明朝）</option>
+            <option value="Roboto, 'Noto Sans', sans-serif">Roboto</option>
+          </optgroup>
+          <optgroup label="Web フォント（要ネット接続 / OFL）">
+            <option data-webfont="Zen Maru Gothic"   data-weights="400;700" value="'Zen Maru Gothic', sans-serif">Zen丸ゴシック</option>
+            <option data-webfont="M PLUS Rounded 1c" data-weights="400;700" value="'M PLUS Rounded 1c', sans-serif">M PLUS Rounded 1c（丸ゴ）</option>
+            <option data-webfont="Kosugi Maru"       data-weights="400"     value="'Kosugi Maru', sans-serif">小杉丸ゴシック</option>
+            <option data-webfont="Zen Kaku Gothic New" data-weights="400;700" value="'Zen Kaku Gothic New', sans-serif">Zen角ゴシック New</option>
+            <option data-webfont="Noto Sans JP"      data-weights="400;700" value="'Noto Sans JP', sans-serif">Noto Sans JP（Web）</option>
+            <option data-webfont="Shippori Mincho"   data-weights="400;700" value="'Shippori Mincho', serif">しっぽり明朝</option>
+            <option data-webfont="Zen Old Mincho"    data-weights="400;700" value="'Zen Old Mincho', serif">Zenオールド明朝</option>
+            <option data-webfont="Klee One"          data-weights="400;600" value="'Klee One', serif">クレー（教科書体風）</option>
+            <option data-webfont="Dela Gothic One"   data-weights="400"     value="'Dela Gothic One', sans-serif">デラゴシック（極太）</option>
+            <option data-webfont="RocknRoll One"     data-weights="400"     value="'RocknRoll One', sans-serif">ロックンロール One</option>
+            <option data-webfont="Yusei Magic"       data-weights="400"     value="'Yusei Magic', sans-serif">油性マジック</option>
+          </optgroup>
+          <optgroup label="欧文">
+            <option value="Arial, Helvetica, sans-serif">Arial</option>
+            <option value="'Helvetica Neue', Helvetica, sans-serif">Helvetica Neue</option>
+            <option value="'Times New Roman', serif">Times New Roman</option>
+            <option value="Georgia, serif">Georgia</option>
+            <option value="'Arial Rounded MT', 'Arial Rounded MT Bold', sans-serif">Arial Rounded MT（丸ゴシック）</option>
+            <option value="'Courier New', monospace">Courier New</option>
+          </optgroup>
+          <optgroup label="総称（必ず使用可）">
+            <option value="sans-serif">sans-serif（ゴシック体）</option>
+            <option value="serif">serif（明朝体）</option>
+            <option value="monospace">monospace（等幅）</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="row"><label></label><label class="chk"><input type="checkbox" id="hideMissing">未インストールを隠す</label></div>
+      <div class="row"><label>サイズ</label><input type="number" id="fontSize" value="48" min="1" max="800" step="1"><span class="unit">px</span></div>
+      <div class="row"><label>行間</label><input type="number" id="lineHeight" value="1.3" min="0.5" max="4" step="0.05"><span class="unit">倍</span></div>
+      <div class="row"><label>長体/平体</label><input type="range" id="condense" min="20" max="200" value="100"><span class="unit"><span id="condenseLabel">100</span>%</span></div>
+      <div class="row"><label>カーニング</label><input type="range" id="letterSpacing" min="-30" max="60" value="0" step="0.5"><span class="unit"><span id="lsLabel">0</span>px</span></div>
+      <div class="row"><label>文字色</label><input type="color" id="textFill" value="#222222"></div>
+      <div class="row"><label>縁取り色</label><input type="color" id="outlineColor" value="#ffffff"></div>
+      <div class="row"><label>縁取り幅</label><input type="number" id="outlineWidth" value="0" min="0" max="100" step="0.5"><span class="unit">px（外側）</span></div>
+      <div class="row"><label>スタイル</label>
+        <label class="chk"><input type="checkbox" id="boldChk">太字</label>
+        <label class="chk"><input type="checkbox" id="italicChk">斜体</label>
+      </div>
+      <div class="row"><label>揃え</label>
+        <select id="textAnchor">
+          <option value="start">左揃え</option>
+          <option value="middle">中央揃え</option>
+          <option value="end">右揃え</option>
+        </select>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ================= キャンバス ================= -->
+  <div class="stage" id="stage">
+    <div class="canvas-wrap" id="canvasWrap">
+      <svg id="canvas" xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+        <rect id="bg" x="0" y="0" width="800" height="600" fill="#ffffff"></rect>
+        <g id="layer"></g>
+        <g id="overlay" style="pointer-events:none">
+          <defs>
+            <pattern id="gridPattern" width="20" height="20" patternUnits="userSpaceOnUse">
+              <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#c9d4e0" stroke-width="1"></path>
+            </pattern>
+          </defs>
+          <rect id="gridRect" x="0" y="0" width="800" height="600" fill="url(#gridPattern)"></rect>
+        </g>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ================= 右パネル ================= -->
+  <aside class="panel right">
+    <section>
+      <h2>読み込み</h2>
+      <div class="row col">
+        <input type="file" id="fileInput" accept=".svg,image/svg+xml">
+        <small>既存の SVG ファイルを読み込んで編集できます。</small>
+      </div>
+    </section>
+
+    <section>
+      <h2>保存</h2>
+      <div class="row col"><label>ファイル名</label><input type="text" id="fileName" value="drawing"></div>
+      <div class="row"><label>フォント埋め込み</label><input type="checkbox" id="embedFont" checked></div>
+      <div class="row col"><small>ON にすると、使用中の Web フォントを書き出しファイルに埋め込み、他の端末でも同じ字形で表示されます（数 KB 増）。埋め込み時、使用文字だけが Google Fonts に送信されます。PNG/JPEG は仕様上つねに埋め込みます。</small></div>
+      <div class="row"><button id="btnSVG" class="primary wide">SVG で保存</button></div>
+      <hr>
+      <div class="row"><label>書き出し幅</label><input type="number" id="exportW" value="800" min="1" max="20000"><span class="unit">px</span></div>
+      <div class="row"><label>書き出し高さ</label><input type="number" id="exportH" value="600" min="1" max="20000"><span class="unit">px</span></div>
+      <div class="row"><label>縦横比固定</label><input type="checkbox" id="lockAspect" checked></div>
+      <div class="row presets">
+        <button data-scale="1">×1</button><button data-scale="2">×2</button>
+        <button data-scale="3">×3</button><button data-scale="4">×4</button>
+      </div>
+      <div class="row"><label>JPEG品質</label><input type="range" id="jpegQuality" min="10" max="100" value="92"><span class="unit"><span id="jqLabel">92</span></span></div>
+      <div class="row"><button id="btnPNG" class="primary">PNG で保存</button><button id="btnJPEG" class="primary">JPEG で保存</button></div>
+    </section>
+
+    <section class="logsec">
+      <h2>イベントログ <button id="btnCopyLog" class="mini">コピー</button><button id="btnClearLog" class="mini">クリア</button></h2>
+      <div id="logBox" class="logbox"></div>
+    </section>
+  </aside>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
