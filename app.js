@@ -68,11 +68,13 @@ function pushHistory(label) {
   if (history.length > 100) history.shift();
   histIdx = history.length - 1;
   if (label) log(`履歴: ${label}（${histIdx + 1} 件目）`);
+  if (typeof scheduleSave === 'function') scheduleSave();
 }
 function applyHistory(i) {
   histIdx = i;
   layer.innerHTML = history[i];
   select(null);
+  scheduleSave();
 }
 function undo() {
   if (histIdx <= 0) { log('これ以上元に戻せません'); return; }
@@ -903,16 +905,20 @@ $('canvasH').addEventListener('change', applyCanvasSize);
 $('bgColor').addEventListener('input', applyBg);
 $('bgTransparent').addEventListener('change', applyBg);
 $('zoom').addEventListener('input', () => { syncLabels(); applyZoom(); });
-$('gridChk').addEventListener('change', () => {
-  $('gridRect').style.display = $('gridChk').checked ? '' : 'none';
-  log(`グリッド: ${$('gridChk').checked ? '表示' : '非表示'}`);
-});
-$('gridSize').addEventListener('change', () => {
+function applyGrid() {
   const g = Math.max(2, +$('gridSize').value || 20);
   const pat = $('gridPattern');
   pat.setAttribute('width', g); pat.setAttribute('height', g);
   pat.firstElementChild.setAttribute('d', `M ${g} 0 L 0 0 0 ${g}`);
-  log(`グリッド幅: ${g}px`);
+  $('gridRect').style.display = $('gridChk').checked ? '' : 'none';
+}
+$('gridChk').addEventListener('change', () => {
+  applyGrid();
+  log(`グリッド: ${$('gridChk').checked ? '表示' : '非表示'}`);
+});
+$('gridSize').addEventListener('change', () => {
+  applyGrid();
+  log(`グリッド幅: ${Math.max(2, +$('gridSize').value || 20)}px`);
 });
 $('snapChk').addEventListener('change', () => log(`スナップ: ${$('snapChk').checked ? 'ON' : 'OFF'}`));
 
@@ -1110,24 +1116,165 @@ function loadSVGText(text, name) {
     if (t.dataset.lineHeight === undefined) t.dataset.lineHeight = 1.3;
   });
   // 使われている Web フォントを自動取得（SVG に埋め込み済みのものは取りに行かない）
-  const usedWeb = new Set();
-  layer.querySelectorAll('text').forEach(t => {
-    const f = firstFamily(t.getAttribute('font-family'));
-    if (f && WEBFONTS.has(f) && !importedFamilies.has(f)) usedWeb.add(f);
-  });
-  usedWeb.forEach(f => ensureWebFont(f));
+  ensureWebFontsInLayer(importedFamilies);
 
   select(null); clearHandles();
   history.length = 0; histIdx = -1; pushHistory();
   log(`SVG を読み込みました: ${name}（${Math.round(w)} × ${Math.round(h)}px, 要素 ${count} 個）`);
 }
 
+/* -------------------------------------------------- 自動保存 / 復元 */
+/* 編集内容とパネル設定を localStorage に保存し、リロード後に復元する。
+   保存はブラウザ内で完結し、外部には送信しない。 */
+const LS_KEY  = 'svgedit.state.v1';
+const LS_FLAG = 'svgedit.autosave';
+const PERSIST_IDS = [
+  'canvasW','canvasH','bgColor','bgTransparent','gridChk','snapChk','gridSize','zoom',
+  'fillColor','fillNone','strokeColor','strokeNone','strokeWidth','rectRadius','dashStyle',
+  'txtContent','fontFamily','fontSize','lineHeight','condense','letterSpacing','textFill',
+  'outlineColor','outlineWidth','boldChk','italicChk','textAnchor','hideMissing',
+  'fileName','exportW','exportH','lockAspect','jpegQuality','embedFont'
+];
+let storageOK = true;
+let saveTimer = null;
+
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { storageOK = false; return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+
+function updateSavedLabel(ts) {
+  if (!ts) { $('savedAt').textContent = '—'; return; }
+  const d = new Date(ts);
+  $('savedAt').textContent = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')} 保存`;
+}
+function saveState() {
+  saveTimer = null;
+  if (!storageOK || !$('autoSave').checked) return;
+  try {
+    const controls = {};
+    PERSIST_IDS.forEach(id => {
+      const el = $(id);
+      if (el) controls[id] = (el.type === 'checkbox') ? el.checked : el.value;
+    });
+    const imported = document.getElementById('importedFonts');
+    const data = {
+      v: 1, ts: Date.now(), controls,
+      layer: layer.innerHTML,
+      importedFonts: imported ? imported.textContent : ''
+    };
+    const str = JSON.stringify(data);
+    if (str.length > 4.5e6) { log('自動保存: データが大きすぎるためスキップしました', true); return; }
+    if (!lsSet(LS_KEY, str)) {
+      storageOK = false;
+      log('自動保存に失敗しました（保存容量の上限に達した可能性があります）', true);
+      return;
+    }
+    updateSavedLabel(data.ts);
+  } catch (e) {
+    log(`自動保存に失敗しました: ${e.message}`, true);
+  }
+}
+function scheduleSave() {
+  if (!storageOK || !$('autoSave').checked) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 800);
+}
+/** レイヤ内で使われている Web フォントを取得する（埋め込み済みのものは除く） */
+function ensureWebFontsInLayer(skip) {
+  const used = new Set();
+  layer.querySelectorAll('text').forEach(t => {
+    const f = firstFamily(t.getAttribute('font-family'));
+    if (f && WEBFONTS.has(f) && !(skip && skip.has(f))) used.add(f);
+  });
+  used.forEach(f => ensureWebFont(f));
+}
+/** 保存済みの id 連番と衝突しないように uid を進める */
+function syncUidFromLayer() {
+  let max = 0;
+  layer.querySelectorAll('[id]').forEach(el => {
+    const m = /^(?:sh|tx)(\d+)$/.exec(el.id);
+    if (m) max = Math.max(max, +m[1]);
+  });
+  uid = Math.max(uid, max);
+}
+function restoreState() {
+  const raw = lsGet(LS_KEY);
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(raw);
+    if (!d || d.v !== 1) return null;
+    if (d.controls) {
+      Object.entries(d.controls).forEach(([id, v]) => {
+        const el = $(id);
+        if (!el) return;
+        if (el.type === 'checkbox') el.checked = !!v;
+        else if (el.tagName === 'SELECT') {          // 存在しない選択肢は無視する
+          if ([...el.options].some(o => o.value === v)) el.value = v;
+        } else el.value = v;
+      });
+    }
+    if (d.importedFonts) {
+      const st = document.createElement('style');
+      st.id = 'importedFonts';
+      st.textContent = d.importedFonts;
+      document.head.appendChild(st);
+    }
+    if (d.controls && +d.controls.exportW && +d.controls.exportW !== +d.controls.canvasW) {
+      $('lockAspect').dataset.userSet = '1';       // 復元した書き出しサイズを維持する
+    }
+    layer.innerHTML = d.layer || '';
+    syncUidFromLayer();
+    return d;
+  } catch (e) {
+    log(`前回の状態を復元できませんでした: ${e.message}`, true);
+    return null;
+  }
+}
+function clearState() {
+  try { localStorage.removeItem(LS_KEY); } catch (e) {}
+  updateSavedLabel(null);
+}
+$('autoSave').addEventListener('change', () => {
+  const on = $('autoSave').checked;
+  lsSet(LS_FLAG, on ? '1' : '0');
+  if (on) { saveState(); log('自動保存: ON'); }
+  else { clearState(); log('自動保存: OFF（保存済みの内容も削除しました）'); }
+});
+$('btnNewDoc').addEventListener('click', () => {
+  layer.innerHTML = '';
+  select(null); clearHandles();
+  history.length = 0; histIdx = -1; pushHistory();
+  clearState(); saveState();
+  log('新規作成しました（保存内容を消去）');
+});
+// 入力・編集のたびに保存（デバウンス）。閉じる直前は取りこぼさないよう即時保存する。
+document.addEventListener('change', scheduleSave);
+document.addEventListener('input',  scheduleSave);
+window.addEventListener('beforeunload', () => { if (saveTimer) { clearTimeout(saveTimer); saveState(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && saveTimer) { clearTimeout(saveTimer); saveState(); } });
+
 /* ------------------------------------------------------------ 初期化 */
 setTool('select');
+if (lsGet(LS_FLAG) === '0') $('autoSave').checked = false;
+const restored = $('autoSave').checked ? restoreState() : null;
 applyCanvasSize();
 applyBg();
+applyGrid();
 syncLabels();
 pushHistory();
 refreshFontAvailability();
 log('SVG エディタを起動しました。ツールを選んでキャンバスをドラッグしてください。');
 log('ショートカット: V=選択 R=長方形 L=直線 T=テキスト / Delete=削除 / Ctrl+Z=元に戻す / Ctrl+D=複製 / Shift=45度・正方形');
+if (!storageOK) {
+  $('autoSave').checked = false;
+  $('autoSave').disabled = true;
+  $('savedAt').textContent = '利用不可';
+  log('このブラウザでは localStorage が使えないため、自動保存を無効にしました', true);
+} else if (restored) {
+  updateSavedLabel(restored.ts);
+  const n = layer.children.length;
+  const ago = Math.round((Date.now() - restored.ts) / 1000);
+  log(`前回の状態を復元しました（要素 ${n} 個 / ${ago < 60 ? ago + '秒前' : Math.round(ago / 60) + '分前'}の保存）`);
+  ensureWebFontsInLayer();
+} else {
+  log('自動保存 ON: 編集内容はこのブラウザに保存され、次回アクセス時に復元されます');
+}

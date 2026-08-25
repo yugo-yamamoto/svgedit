@@ -158,6 +158,13 @@
   <!-- ================= 右パネル ================= -->
   <aside class="panel right">
     <section>
+      <h2>自動保存</h2>
+      <div class="row"><label>自動保存</label><input type="checkbox" id="autoSave" checked><span class="unit" id="savedAt">—</span></div>
+      <div class="row col"><small>編集内容とパネルの設定をブラウザ内（localStorage）に保存し、次回アクセス時に復元します。サーバーには送信されません。</small></div>
+      <div class="row"><button id="btnNewDoc" class="wide">保存内容を消して新規作成</button></div>
+    </section>
+
+    <section>
       <h2>読み込み</h2>
       <div class="row col">
         <input type="file" id="fileInput" accept=".svg,image/svg+xml">
