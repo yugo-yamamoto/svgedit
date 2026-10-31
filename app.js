@@ -270,10 +270,10 @@ function firstFamily(v) {
   if (!v) return null;
   return String(v).split(',')[0].trim().replace(/^['"]|['"]$/g, '');
 }
-/** キャンバス上のテキストから「Web フォント → 使用文字・使用ウェイト」を集計 */
-function collectUsedWebFonts() {
+/** キャンバス上（root 以下）のテキストから「Web フォント → 使用文字・使用ウェイト」を集計 */
+function collectUsedWebFonts(root = layer) {
   const usage = new Map();
-  layer.querySelectorAll('text').forEach(t => {
+  [root, ...root.querySelectorAll('text')].filter(t => t.localName === 'text').forEach(t => {
     const fam = firstFamily(t.getAttribute('font-family'));
     if (!fam || !WEBFONTS.has(fam)) return;
     const u = usage.get(fam) || { chars: new Set(), weights: new Set() };
@@ -1126,27 +1126,54 @@ function selectionToSVG() {
   out.appendChild(selected.cloneNode(true));
   return { text: new XMLSerializer().serializeToString(out), w, h };
 }
+/** SVG 文字列を等倍の PNG に変換する。<img> 経由では外部フォントを読めないため Web フォントは埋め込む */
+async function svgToPNG(text, w, h, usage) {
+  if (usage.size) {
+    try {
+      const { css } = await buildFontFaceCSS(usage);
+      if (css.trim()) text = text.replace(/^(<svg[^>]*>)/, `$1<defs><style>${css}</style></defs>`);
+    } catch (e) {
+      log(`PNG へのフォント埋め込みに失敗: ${e.message}（代替フォントで描画します）`, true);
+    }
+  }
+  const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const img = await loadImage(url);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    const png = await new Promise(res => cv.toBlob(res, 'image/png'));
+    if (!png) throw new Error('PNG の生成に失敗しました');
+    return png;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 /** 選択要素を SVG 形式（image/svg+xml）でクリップボードへ書き込む。
     copy イベントの clipboardData.setData('image/svg+xml') はブラウザ内部の独自形式になり
     他のアプリからは SVG として見えないため、非同期 Clipboard API で書き込む。
-    本エディタへ Ctrl+V で貼り戻せるよう text/plain にも SVG ソースを入れる */
+    本エディタへ Ctrl+V で貼り戻せるよう text/plain にも SVG ソースを入れ、
+    SVG を読めないアプリ向けに PNG も入れる */
 async function copySelected(cut) {
   if (!selected) { log(`${cut ? '切り取り' : 'コピー'}対象が選択されていません`); return; }
   const tag = selected.tagName;
   try {
     const { text, w, h } = selectionToSVG();
-    const svgOK = !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write &&
-                     (!ClipboardItem.supports || ClipboardItem.supports('image/svg+xml')));
-    if (svgOK) {
-      await navigator.clipboard.write([new ClipboardItem({
-        'image/svg+xml': new Blob([text], { type: 'image/svg+xml' }),
-        'text/plain':    new Blob([text], { type: 'text/plain' }),
-      })]);
+    const usage = collectUsedWebFonts(selected);      // 切り取りで要素が消える前に集計しておく
+    const canWrite = !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
+    const supports = t => canWrite && (!ClipboardItem.supports || ClipboardItem.supports(t));
+    const data = { 'text/plain': new Blob([text], { type: 'text/plain' }) };
+    if (supports('image/svg+xml')) data['image/svg+xml'] = new Blob([text], { type: 'image/svg+xml' });
+    // PNG の生成は非同期。Promise のまま渡すとユーザー操作の直後に書き込みを始められる
+    if (supports('image/png'))     data['image/png'] = svgToPNG(text, w, h, usage);
+    const types = Object.keys(data);
+    if (canWrite) {
+      await navigator.clipboard.write([new ClipboardItem(data)]);
     } else {
       await navigator.clipboard.writeText(text);
-      log('このブラウザは SVG 形式での書き込みに未対応のため、SVG ソースをテキストとしてコピーしました', true);
     }
-    log(`<${tag}> を SVG として${cut ? '切り取り' : 'コピー'}しました（${svgOK ? 'image/svg+xml + text/plain' : 'text/plain'} / ${w} × ${h}px, ${text.length.toLocaleString()} bytes）`);
+    if (!data['image/svg+xml']) log('このブラウザは SVG 形式での書き込みに未対応のため、SVG ソースをテキストとしてコピーしました', true);
+    log(`<${tag}> を SVG として${cut ? '切り取り' : 'コピー'}しました（${types.join(' + ')} / ${w} × ${h}px, ${text.length.toLocaleString()} bytes）`);
     if (cut) deleteSelected();
   } catch (err) {
     log(`クリップボードに書き込めませんでした: ${err.message}`, true);
