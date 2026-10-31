@@ -1126,39 +1126,33 @@ function selectionToSVG() {
   out.appendChild(selected.cloneNode(true));
   return { text: new XMLSerializer().serializeToString(out), w, h };
 }
-/** Ctrl+C / Ctrl+X。テキスト入力中や文字列を選択中はブラウザ標準の動作に任せる */
-function onCopy(e, cut) {
-  if (!selected || cropTarget || isEditable(e.target) || String(window.getSelection())) return;
+/** 選択要素を SVG 形式（image/svg+xml）でクリップボードへ書き込む。
+    copy イベントの clipboardData.setData('image/svg+xml') はブラウザ内部の独自形式になり
+    他のアプリからは SVG として見えないため、非同期 Clipboard API で書き込む。
+    本エディタへ Ctrl+V で貼り戻せるよう text/plain にも SVG ソースを入れる */
+async function copySelected(cut) {
+  if (!selected) { log(`${cut ? '切り取り' : 'コピー'}対象が選択されていません`); return; }
+  const tag = selected.tagName;
   try {
     const { text, w, h } = selectionToSVG();
-    e.clipboardData.setData('text/plain', text);
-    e.clipboardData.setData('image/svg+xml', text);
-    e.preventDefault();
-    log(`<${selected.tagName}> を SVG として${cut ? '切り取り' : 'コピー'}しました（${w} × ${h}px, ${text.length.toLocaleString()} bytes）`);
-    if (cut) deleteSelected();
-  } catch (err) {
-    log(`コピーに失敗しました: ${err.message}`, true);
-  }
-}
-document.addEventListener('copy', (e) => onCopy(e, false));
-document.addEventListener('cut',  (e) => onCopy(e, true));
-$('btnCopy').addEventListener('click', async () => {
-  if (!selected) { log('コピー対象が選択されていません'); return; }
-  try {
-    const { text, w, h } = selectionToSVG();
-    const types = ['text/plain'];
-    if (window.ClipboardItem && ClipboardItem.supports && ClipboardItem.supports('image/svg+xml')) types.push('image/svg+xml');
-    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
-      await navigator.clipboard.write([new ClipboardItem(
-        Object.fromEntries(types.map(t => [t, new Blob([text], { type: t })])))]);
+    const svgOK = !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write &&
+                     (!ClipboardItem.supports || ClipboardItem.supports('image/svg+xml')));
+    if (svgOK) {
+      await navigator.clipboard.write([new ClipboardItem({
+        'image/svg+xml': new Blob([text], { type: 'image/svg+xml' }),
+        'text/plain':    new Blob([text], { type: 'text/plain' }),
+      })]);
     } else {
       await navigator.clipboard.writeText(text);
+      log('このブラウザは SVG 形式での書き込みに未対応のため、SVG ソースをテキストとしてコピーしました', true);
     }
-    log(`<${selected.tagName}> を SVG としてコピーしました（${types.join(' + ')} / ${w} × ${h}px）`);
+    log(`<${tag}> を SVG として${cut ? '切り取り' : 'コピー'}しました（${svgOK ? 'image/svg+xml + text/plain' : 'text/plain'} / ${w} × ${h}px, ${text.length.toLocaleString()} bytes）`);
+    if (cut) deleteSelected();
   } catch (err) {
-    log(`クリップボードに書き込めませんでした: ${err.message}（Ctrl+C をお試しください）`, true);
+    log(`クリップボードに書き込めませんでした: ${err.message}`, true);
   }
-});
+}
+$('btnCopy').addEventListener('click', () => copySelected(false));
 
 /* ---- 拡縮（数値入力） ---- */
 function selectedImage() {
@@ -1366,6 +1360,11 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelected(); return; }
+  // 文字列を選択中はブラウザ標準のコピーに任せる
+  if ((e.ctrlKey || e.metaKey) && ['c', 'x'].includes(e.key.toLowerCase()) && selected && !cropTarget &&
+      !String(window.getSelection())) {
+    e.preventDefault(); copySelected(e.key.toLowerCase() === 'x'); return;
+  }
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); return; }
   if (e.key === 'Escape') { select(null); clearHandles(); return; }
   if (['v','r','l','t'].includes(e.key.toLowerCase()) && !e.ctrlKey && !e.metaKey) {
