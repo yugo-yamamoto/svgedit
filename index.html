@@ -21,6 +21,8 @@
     <button id="btnRedo" title="やり直し (Ctrl+Shift+Z)">↷ やり直し</button>
     <button id="btnFront" title="最前面へ">⬆ 前面</button>
     <button id="btnBack" title="最背面へ">⬇ 背面</button>
+    <button id="btnCopy" title="選択した図形を SVG としてコピー (Ctrl+C / 切り取りは Ctrl+X)">📄 コピー</button>
+    <button id="btnPaste"title="クリップボードの SVG / 画像を貼り付け (Ctrl+V)">📋 貼り付け</button>
     <button id="btnDup" title="複製 (Ctrl+D)">⧉ 複製</button>
     <button id="btnDelete" class="danger" title="削除 (Delete)">🗑 削除</button>
   </div>
@@ -55,6 +57,17 @@
           <option value="12 5 3 5">一点鎖線</option>
         </select>
       </div>
+    </section>
+
+    <section id="secImage" style="display:none">
+      <h2>画像</h2>
+      <div class="row"><label>元画像</label><span class="unit" id="imgNatural">—</span></div>
+      <div class="row"><label>表示サイズ</label><input type="number" id="imgW" min="1" max="20000" step="1"><span class="unit">×</span><input type="number" id="imgH" min="1" max="20000" step="1"></div>
+      <div class="row"><label>縦横比を保持</label><input type="checkbox" id="imgKeepAspect" checked></div>
+      <div class="row"><button id="btnImgReset">原寸</button><button id="btnImgFit">画面に合わせる</button></div>
+      <div class="row"><button id="btnCropStart" class="wide">トリミング</button></div>
+      <div class="row" id="cropActions" style="display:none"><button id="btnCropApply" class="primary">適用</button><button id="btnCropCancel">キャンセル</button></div>
+      <div class="row col"><small>ハンドルで拡縮（角＝縦横比を保持、Shift で自由変形）。トリミングは画像の上をドラッグして範囲を決め、[適用] で確定します（Enter / Esc も可）。</small></div>
     </section>
 
     <section id="secText">

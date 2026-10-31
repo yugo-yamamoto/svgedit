@@ -502,6 +502,7 @@ function renderSelection() {
   clearHandles();
   if (!selected || !selected.parentNode) return;
   const k = 1 / zoomFactor();
+  if (cropTarget) { renderCropUI(k); return; }
   const b = bboxOf(selected);
   if (!b) return;
   const box = document.createElementNS(NS, 'rect');
@@ -515,7 +516,7 @@ function renderSelection() {
   overlay.appendChild(box);
 
   const tag = selected.tagName.toLowerCase();
-  if (tag === 'rect') {
+  if (tag === 'rect' || tag === 'image') {
     const x1 = +selected.getAttribute('x'), y1 = +selected.getAttribute('y');
     const w  = +selected.getAttribute('width'), h = +selected.getAttribute('height');
     const cx = x1 + w / 2, cy = y1 + h / 2;
@@ -530,15 +531,30 @@ function renderSelection() {
   }
 }
 function select(el) {
+  if (cropTarget && el !== cropTarget) cancelCrop();
   selected = el;
   renderSelection();
+  updateSectionVisibility();
   if (el) { loadPropsFrom(el); log(`選択: <${el.tagName}> id=${el.id || '(なし)'}`); }
+}
+/** 画像を選択したときだけ「画像」セクションを表示する */
+function updateSectionVisibility() {
+  const tag = selected ? selected.tagName.toLowerCase() : null;
+  $('secImage').style.display = (tag === 'image') ? '' : 'none';
 }
 
 /* ------------------------------------------------ 要素 → パネル 反映 */
 function loadPropsFrom(el) {
   suppress = true;
   const tag = el.tagName.toLowerCase();
+  if (tag === 'image') {
+    $('imgW').value = Math.round(+el.getAttribute('width')  || 0);
+    $('imgH').value = Math.round(+el.getAttribute('height') || 0);
+    const nw = el.dataset.naturalW, nh = el.dataset.naturalH;
+    $('imgNatural').textContent = (nw && nh) ? `${nw} × ${nh}px` : 'サイズ不明';
+    suppress = false;
+    return;
+  }
   if (tag === 'text') {
     $('txtContent').value = el.dataset.text !== undefined ? el.dataset.text
                             : [...el.childNodes].map(n => n.textContent).join('\n');
@@ -616,6 +632,7 @@ function toHex(c) {
 function reapplySelected() {
   if (suppress || !selected) return;
   const tag = selected.tagName.toLowerCase();
+  if (tag === 'image') return;            // 画像は専用パネルで操作する
   if (tag === 'text') {
     const p = textProps();
     applyTextStyle(selected, p);
@@ -677,7 +694,7 @@ function moveBy(el, dx, dy) {
     el.setAttribute('transform', `translate(${tx},${ty}) ${el.dataset.baseTransform}`.trim());
   }
 }
-function resizeRect(el, handle, st, p) {
+function resizeRect(el, handle, st, p, keepAspect) {
   let x = st.x, y = st.y, w = st.w, h = st.h;
   const px = snap(p.x), py = snap(p.y);
   if (handle.includes('w')) { w = st.x + st.w - px; x = px; }
@@ -686,6 +703,13 @@ function resizeRect(el, handle, st, p) {
   if (handle.includes('s')) { h = py - st.y; }
   if (w < 0) { x += w; w = -w; }
   if (h < 0) { y += h; h = -h; }
+  // 角ハンドルでの縦横比保持（対角側を固定点にする）
+  if (keepAspect && handle.length === 2 && st.w > 0 && st.h > 0) {
+    const ratio = st.w / st.h;
+    if (w / Math.max(h, 1e-6) > ratio) w = h * ratio; else h = w / ratio;
+    if (handle.includes('w')) x = st.x + st.w - w;
+    if (handle.includes('n')) y = st.y + st.h - h;
+  }
   el.setAttribute('x', x); el.setAttribute('y', y);
   el.setAttribute('width', w); el.setAttribute('height', h);
 }
@@ -698,7 +722,7 @@ svg.addEventListener('pointerdown', (evt) => {
 
   if (handleName && selected) {
     const tag = selected.tagName.toLowerCase();
-    if (tag === 'rect' && handleName.length <= 2) {
+    if ((tag === 'rect' || tag === 'image') && handleName.length <= 2) {
       drag = { mode: 'resize', handle: handleName,
                st: { x: +selected.getAttribute('x'), y: +selected.getAttribute('y'),
                      w: +selected.getAttribute('width'), h: +selected.getAttribute('height') } };
@@ -707,6 +731,13 @@ svg.addEventListener('pointerdown', (evt) => {
     } else {
       drag = { mode: 'move', last: p };
     }
+    svg.setPointerCapture(evt.pointerId);
+    evt.preventDefault();
+    return;
+  }
+
+  if (cropTarget) {                       // トリミング中は範囲指定のみ受け付ける
+    beginCropDrag(p);
     svg.setPointerCapture(evt.pointerId);
     evt.preventDefault();
     return;
@@ -775,7 +806,13 @@ svg.addEventListener('pointermove', (evt) => {
     moveBy(selected, dx, dy);
     drag.last = p;
   } else if (drag.mode === 'resize') {
-    resizeRect(selected, drag.handle, drag.st, p);
+    // 画像の角ハンドルは既定で縦横比を保持し、Shift で自由変形にする
+    const keep = selected.tagName.toLowerCase() === 'image'
+                 && $('imgKeepAspect').checked && !evt.shiftKey;
+    resizeRect(selected, drag.handle, drag.st, p, keep);
+    if (selected.tagName.toLowerCase() === 'image') loadPropsFrom(selected);
+  } else if (drag.mode === 'crop') {
+    updateCropRect(p, evt.shiftKey);
   } else if (drag.mode === 'endpoint') {
     const n = drag.handle === 'p1' ? '1' : '2';
     let x = snap(p.x), y = snap(p.y);
@@ -811,6 +848,10 @@ function endDrag(evt) {
   } else if (d.mode === 'resize') {
     log(`サイズ変更: ${Math.round(+selected.getAttribute('width'))} × ${Math.round(+selected.getAttribute('height'))}`);
     pushHistory('サイズ変更');
+  } else if (d.mode === 'crop') {
+    if (cropRect) log(`トリミング範囲: ${Math.round(cropRect.w)} × ${Math.round(cropRect.h)}（[適用] で確定）`);
+    renderSelection();
+    return;
   } else if (d.mode === 'endpoint') {
     log('直線の端点を変更しました'); pushHistory('端点変更');
   }
@@ -825,6 +866,462 @@ svg.addEventListener('dblclick', (evt) => {
     log('テキスト編集: 左パネルの入力欄で編集してください');
   }
 });
+
+/* ------------------------------------- 画像の貼り付け・拡縮・トリミング */
+const XLINK = 'http://www.w3.org/1999/xlink';
+let cropTarget = null;      // トリミング対象の <image>
+let cropRect   = null;      // トリミング範囲（ユーザー座標）
+
+function imageHref(el) {
+  return el.getAttribute('href') || el.getAttributeNS(XLINK, 'href') || '';
+}
+function setImageHref(el, url) {
+  el.setAttribute('href', url);
+  if (el.getAttributeNS(XLINK, 'href')) el.removeAttributeNS(XLINK, 'href');
+}
+function imageBox(el) {
+  return { x: +el.getAttribute('x') || 0, y: +el.getAttribute('y') || 0,
+           w: +el.getAttribute('width') || 0, h: +el.getAttribute('height') || 0 };
+}
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload  = () => res(img);
+    img.onerror = () => rej(new Error('画像を読み込めませんでした'));
+    img.src = src;
+  });
+}
+function readAsDataURL(blob) {
+  return new Promise((res, rej) => {
+    const rd = new FileReader();
+    rd.onload  = () => res(String(rd.result));
+    rd.onerror = () => rej(new Error('画像を読み取れませんでした'));
+    rd.readAsDataURL(blob);
+  });
+}
+/** データ URL の画像をキャンバス中央に配置する（大きい場合は収まるよう縮小） */
+async function insertImage(dataUrl, note) {
+  const img = await loadImage(dataUrl);
+  const cw = +$('canvasW').value || 800, ch = +$('canvasH').value || 600;
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  const scale = Math.min(1, (cw * 0.9) / nw, (ch * 0.9) / nh);
+  const w = Math.max(1, Math.round(nw * scale)), h = Math.max(1, Math.round(nh * scale));
+  const el = document.createElementNS(NS, 'image');
+  el.setAttribute('x', Math.round((cw - w) / 2));
+  el.setAttribute('y', Math.round((ch - h) / 2));
+  el.setAttribute('width', w);
+  el.setAttribute('height', h);
+  el.setAttribute('preserveAspectRatio', 'none');   // Shift での自由変形を効かせる
+  setImageHref(el, dataUrl);
+  el.dataset.naturalW = nw;
+  el.dataset.naturalH = nh;
+  el.id = 'im' + (++uid);
+  layer.appendChild(el);
+  setTool('select');
+  select(el);
+  pushHistory('画像を貼り付け');
+  log(`画像を貼り付けました: ${nw} × ${nh}px → 表示 ${w} × ${h}px（${(dataUrl.length / 1024).toFixed(0)} KB${note ? ' / ' + note : ''}）`);
+  if (dataUrl.length > 3e6) log('画像が大きいため、自動保存がスキップされることがあります', true);
+  return el;
+}
+/* ---- SVG の貼り付け（ベクターのまま <g> にまとめて配置） ---- */
+const SVG_TYPES   = ['image/svg+xml', 'web image/svg+xml'];
+const SVG_TEXT_RE = /^\s*(<\?xml[\s\S]*?\?>\s*)?(<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>][\s\S]*<\/svg>\s*$/i;
+const SVG_UNITS   = { px: 1, pt: 4 / 3, pc: 16, mm: 96 / 25.4, cm: 96 / 2.54, in: 96 };
+
+/** width / height 属性を px に換算する（% や auto は null） */
+function svgLength(v) {
+  const m = /^\s*([\d.]+(?:e[+-]?\d+)?)\s*(px|pt|pc|mm|cm|in)?\s*$/i.exec(v || '');
+  return m ? +m[1] * SVG_UNITS[(m[2] || 'px').toLowerCase()] : null;
+}
+/** text/html に含まれる最初の <svg> を SVG 文字列として取り出す（Web ページからのコピー） */
+function svgFromHtml(html) {
+  if (!html || !/<svg[\s>]/i.test(html)) return null;
+  const el = new DOMParser().parseFromString(html, 'text/html').querySelector('svg');
+  return el ? new XMLSerializer().serializeToString(el) : null;
+}
+/** スクリプトやイベントハンドラ属性を取り除く */
+function sanitizeSvg(root) {
+  root.querySelectorAll('script, iframe, object, embed').forEach(n => n.remove());
+  [root, ...root.querySelectorAll('*')].forEach(el => {
+    [...el.attributes].forEach(a => {
+      if (/^on/i.test(a.name) || (/href$/i.test(a.name) && /^\s*javascript:/i.test(a.value))) {
+        el.removeAttributeNode(a);
+      }
+    });
+  });
+}
+/** 貼り付けるたびに id が衝突しないよう接頭辞を付け、url(#…) / href="#…" の参照も書き換える */
+function uniquifyIds(root, prefix) {
+  const map = new Map();
+  root.querySelectorAll('[id]').forEach(el => { map.set(el.id, prefix + el.id); el.id = prefix + el.id; });
+  if (!map.size) return;
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re  = new RegExp(`url\\(\\s*(['"]?)#(${[...map.keys()].map(esc).join('|')})\\1\\s*\\)`, 'g');
+  root.querySelectorAll('*').forEach(el => {
+    [...el.attributes].forEach(a => {
+      if (/(^|:)href$/.test(a.name) && a.value.startsWith('#') && map.has(a.value.slice(1))) {
+        a.value = '#' + map.get(a.value.slice(1));
+      } else if (a.value.includes('url(')) {
+        a.value = a.value.replace(re, (m, q, id) => `url(#${map.get(id)})`);
+      }
+    });
+  });
+}
+/** SVG 文字列をキャンバス中央に配置する（大きい場合は収まるよう縮小） */
+function pasteSVGText(text, source) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) throw new Error('SVG の解析に失敗しました');
+  const root = doc.documentElement;
+  if (!root || root.localName !== 'svg') throw new Error('SVG ではありません');
+
+  sanitizeSvg(root);
+  const families = absorbStyles(root, true);
+  const bg = root.querySelector(':scope > rect#bg');   // 本エディタが書き出した背景は貼らない
+  if (bg) bg.remove();
+  const n = ++uid;
+  uniquifyIds(root, `sh${n}-`);
+
+  // viewBox → width/height の拡縮を保つ
+  const vb = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+  let frame = (vb.length === 4 && vb.every(v => !isNaN(v)) && vb[2] > 0 && vb[3] > 0)
+            ? { x: vb[0], y: vb[1], w: vb[2], h: vb[3] } : null;
+  const aw = svgLength(root.getAttribute('width')), ah = svgLength(root.getAttribute('height'));
+  let s = 1;
+  if (frame) {
+    if (aw && ah) s = Math.min(aw / frame.w, ah / frame.h);
+    else if (aw)  s = aw / frame.w;
+    else if (ah)  s = ah / frame.h;
+  } else if (aw && ah) {
+    frame = { x: 0, y: 0, w: aw, h: ah };
+  }
+
+  const g = document.createElementNS(NS, 'g');
+  g.id = 'sh' + n;
+  // ルート <svg> の fill / stroke / style などは子へ継承されるので <g> に引き継ぐ
+  const SKIP = /^(width|height|viewBox|x|y|id|class|version|baseProfile|preserveAspectRatio|transform|enable-background|data-svgedit-copy|xmlns(:.*)?|xml:.*)$/;
+  [...root.attributes].forEach(a => { if (!SKIP.test(a.name) && !a.name.includes(':')) g.setAttribute(a.name, a.value); });
+  [...root.children].forEach(c => {
+    if (c.namespaceURI !== NS || ['title', 'desc', 'metadata'].includes(c.localName)) return;
+    g.appendChild(document.importNode(c, true));
+  });
+  if (!g.childElementCount) throw new Error('貼り付けられる要素がありません');
+  layer.appendChild(g);
+
+  if (!frame) {                                       // 大きさの手掛かりがなければ中身の外接矩形
+    const b = g.getBBox();
+    frame = { x: b.x, y: b.y, w: b.width || 1, h: b.height || 1 };
+  }
+  const cw = +$('canvasW').value || 800, ch = +$('canvasH').value || 600;
+  s *= Math.min(1, (cw * 0.9) / (frame.w * s), (ch * 0.9) / (frame.h * s));
+  const r2 = v => Math.round(v * 100) / 100;
+  let tx = (cw - frame.w * s) / 2 - frame.x * s, ty = (ch - frame.h * s) / 2 - frame.y * s;
+  // 本エディタでコピーしたものは、キャンバス内に収まるなら元の位置から少しずらして置く（複製と同じ）
+  const own = root.hasAttribute('data-svgedit-copy');
+  if (own && s === 1 && frame.x + 12 >= 0 && frame.y + 12 >= 0 &&
+      frame.x + frame.w + 12 <= cw && frame.y + frame.h + 12 <= ch) { tx = 12; ty = 12; }
+  tx = r2(tx); ty = r2(ty);
+
+  // 等倍で 1 要素だけなら <g> で包まず、長方形・テキストなどとしてそのまま編集できるようにする
+  let el = g;
+  const only = g.firstElementChild;
+  if (s === 1 && g.childElementCount === 1 && g.attributes.length === 1 &&
+      !['defs', 'style', 'use'].includes(only.localName)) {
+    el = only;
+    g.replaceWith(el);
+    el.id = ({ text: 'tx', image: 'im' }[el.localName] || 'sh') + n;
+    moveBy(el, tx, ty);
+  } else {
+    g.setAttribute('transform', `translate(${tx},${ty}) scale(${+s.toPrecision(6)})`);
+  }
+
+  ensureWebFontsInLayer(families);
+  setTool('select');
+  select(el);
+  pushHistory('SVG を貼り付け');
+  log(`SVG を貼り付けました（${source}）: ${el === g ? `要素 ${g.childElementCount} 個をグループ化` : `<${el.localName}>`} / 表示 ${Math.round(frame.w * s)} × ${Math.round(frame.h * s)}px（倍率 ${Math.round(s * 100)}%）`);
+  return el;
+}
+
+function isEditable(t) {
+  const tag = (t && t.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || !!(t && t.isContentEditable);
+}
+/** Ctrl+V。SVG 型 → SVG ファイル → SVG ソースのテキスト / HTML → 画像 の順に探す。
+    テキスト入力中は文字の貼り付けを邪魔しない */
+window.addEventListener('paste', async (e) => {
+  const cd = e.clipboardData;
+  if (!cd) return;
+  log(`貼り付け: 形式 [${[...cd.types].join(', ') || 'なし'}]`);
+  const files = [...cd.items].filter(it => it.kind === 'file');
+  let svgText = null, svgFile = null, source = '';
+  if (!isEditable(e.target)) {
+    const t = SVG_TYPES.find(t => cd.getData(t));
+    if (t) { svgText = cd.getData(t); source = t; }
+    else if ((svgFile = files.find(it => it.type === 'image/svg+xml'))) source = 'SVG ファイル';
+    else if (SVG_TEXT_RE.test(cd.getData('text/plain'))) { svgText = cd.getData('text/plain'); source = 'SVG ソース'; }
+    else if ((svgText = svgFromHtml(cd.getData('text/html')))) source = 'HTML 内の SVG';
+  }
+  if (svgText || svgFile) {
+    e.preventDefault();
+    try { pasteSVGText(svgText || await svgFile.getAsFile().text(), source); }
+    catch (err) { log(`SVG の貼り付けに失敗しました: ${err.message}`, true); }
+    return;
+  }
+  const item = files.find(it => /^image\//.test(it.type));
+  if (!item) return;
+  e.preventDefault();
+  try {
+    await insertImage(await readAsDataURL(item.getAsFile()), item.type);
+  } catch (err) {
+    log(`画像の貼り付けに失敗しました: ${err.message}`, true);
+  }
+});
+$('btnPaste').addEventListener('click', async () => {
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    log('このブラウザは読み取り API に未対応です。キャンバスをクリックしてから Ctrl+V を押してください', true);
+    return;
+  }
+  try {
+    const items = await navigator.clipboard.read();
+    log(`クリップボード: 形式 [${items.flatMap(it => it.types).join(', ') || 'なし'}]`);
+    const readText = async (it, t) => it.types.includes(t) ? (await it.getType(t)).text() : '';
+    for (const it of items) {
+      const t = SVG_TYPES.find(t => it.types.includes(t));
+      if (t) { pasteSVGText(await readText(it, t), t); return; }
+    }
+    for (const it of items) {
+      const plain = await readText(it, 'text/plain');
+      if (SVG_TEXT_RE.test(plain)) { pasteSVGText(plain, 'SVG ソース'); return; }
+      const fromHtml = svgFromHtml(await readText(it, 'text/html'));
+      if (fromHtml) { pasteSVGText(fromHtml, 'HTML 内の SVG'); return; }
+    }
+    for (const it of items) {
+      const type = it.types.find(t => /^image\//.test(t));
+      if (type) { await insertImage(await readAsDataURL(await it.getType(type)), type); return; }
+    }
+    log('クリップボードに SVG / 画像がありません', true);
+  } catch (err) {
+    log(`クリップボードを読み取れませんでした: ${err.message}（Ctrl+V をお試しください）`, true);
+  }
+});
+
+/* ---- 選択要素を SVG としてコピー / 切り取り ---- */
+/** 選択要素だけを含む単体の SVG 文字列を作る（表示範囲は外接矩形＋線幅ぶんの余白） */
+function selectionToSVG() {
+  const b = bboxOf(selected);
+  if (!b) throw new Error('要素の大きさを取得できません');
+  const sw = [selected, ...selected.querySelectorAll('*')]
+    .map(el => parseFloat(el.getAttribute('stroke-width')) || 0);
+  const pad = Math.ceil(Math.max(0, ...sw) / 2) + 1;
+  const x = Math.floor(b.x - pad), y = Math.floor(b.y - pad);
+  const w = Math.ceil(b.x + b.width + pad) - x, h = Math.ceil(b.y + b.height + pad) - y;
+  const out = document.createElementNS(NS, 'svg');
+  out.setAttribute('xmlns', NS);
+  out.setAttribute('xmlns:xlink', XLINK);
+  out.setAttribute('width', w);
+  out.setAttribute('height', h);
+  out.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+  out.setAttribute('data-svgedit-copy', '1');   // 本エディタに貼り戻すとき元の位置付近に置く目印
+  out.appendChild(selected.cloneNode(true));
+  return { text: new XMLSerializer().serializeToString(out), w, h };
+}
+/** Ctrl+C / Ctrl+X。テキスト入力中や文字列を選択中はブラウザ標準の動作に任せる */
+function onCopy(e, cut) {
+  if (!selected || cropTarget || isEditable(e.target) || String(window.getSelection())) return;
+  try {
+    const { text, w, h } = selectionToSVG();
+    e.clipboardData.setData('text/plain', text);
+    e.clipboardData.setData('image/svg+xml', text);
+    e.preventDefault();
+    log(`<${selected.tagName}> を SVG として${cut ? '切り取り' : 'コピー'}しました（${w} × ${h}px, ${text.length.toLocaleString()} bytes）`);
+    if (cut) deleteSelected();
+  } catch (err) {
+    log(`コピーに失敗しました: ${err.message}`, true);
+  }
+}
+document.addEventListener('copy', (e) => onCopy(e, false));
+document.addEventListener('cut',  (e) => onCopy(e, true));
+$('btnCopy').addEventListener('click', async () => {
+  if (!selected) { log('コピー対象が選択されていません'); return; }
+  try {
+    const { text, w, h } = selectionToSVG();
+    const types = ['text/plain'];
+    if (window.ClipboardItem && ClipboardItem.supports && ClipboardItem.supports('image/svg+xml')) types.push('image/svg+xml');
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+      await navigator.clipboard.write([new ClipboardItem(
+        Object.fromEntries(types.map(t => [t, new Blob([text], { type: t })])))]);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    log(`<${selected.tagName}> を SVG としてコピーしました（${types.join(' + ')} / ${w} × ${h}px）`);
+  } catch (err) {
+    log(`クリップボードに書き込めませんでした: ${err.message}（Ctrl+C をお試しください）`, true);
+  }
+});
+
+/* ---- 拡縮（数値入力） ---- */
+function selectedImage() {
+  return (selected && selected.tagName.toLowerCase() === 'image') ? selected : null;
+}
+function applyImageSize(w, h) {
+  const el = selectedImage();
+  if (!el) return;
+  el.setAttribute('width',  Math.max(1, Math.round(w)));
+  el.setAttribute('height', Math.max(1, Math.round(h)));
+  renderSelection();
+}
+$('imgW').addEventListener('input', () => {
+  const el = selectedImage();
+  if (suppress || !el) return;
+  const b = imageBox(el);
+  const w = Math.max(1, +$('imgW').value || 1);
+  const h = $('imgKeepAspect').checked && b.w > 0 ? w * (b.h / b.w) : b.h;
+  suppress = true; $('imgH').value = Math.round(h); suppress = false;
+  applyImageSize(w, h);
+});
+$('imgH').addEventListener('input', () => {
+  const el = selectedImage();
+  if (suppress || !el) return;
+  const b = imageBox(el);
+  const h = Math.max(1, +$('imgH').value || 1);
+  const w = $('imgKeepAspect').checked && b.h > 0 ? h * (b.w / b.h) : b.w;
+  suppress = true; $('imgW').value = Math.round(w); suppress = false;
+  applyImageSize(w, h);
+});
+['imgW', 'imgH'].forEach(id =>
+  $(id).addEventListener('change', () => { if (selectedImage()) pushHistory('画像サイズ変更'); }));
+
+$('btnImgReset').addEventListener('click', () => {
+  const el = selectedImage();
+  if (!el) { log('画像が選択されていません', true); return; }
+  applyImageSize(+el.dataset.naturalW || imageBox(el).w, +el.dataset.naturalH || imageBox(el).h);
+  loadPropsFrom(el); pushHistory('画像を原寸に');
+  log(`原寸に戻しました: ${el.getAttribute('width')} × ${el.getAttribute('height')}px`);
+});
+$('btnImgFit').addEventListener('click', () => {
+  const el = selectedImage();
+  if (!el) { log('画像が選択されていません', true); return; }
+  const cw = +$('canvasW').value || 800, ch = +$('canvasH').value || 600;
+  const b  = imageBox(el);
+  const s  = Math.min(cw / b.w, ch / b.h);
+  const w  = Math.round(b.w * s), h = Math.round(b.h * s);
+  el.setAttribute('x', Math.round((cw - w) / 2));
+  el.setAttribute('y', Math.round((ch - h) / 2));
+  applyImageSize(w, h);
+  loadPropsFrom(el); pushHistory('画像を画面に合わせる');
+  log(`画面に合わせました: ${w} × ${h}px`);
+});
+
+/* ---- トリミング ---- */
+function startCrop() {
+  const el = selectedImage();
+  if (!el) { log('トリミングする画像を選択してください', true); return; }
+  cropTarget = el;
+  cropRect   = imageBox(el);
+  $('cropActions').style.display  = '';
+  $('btnCropStart').style.display = 'none';
+  svg.setAttribute('class', 'tool-crop');
+  renderSelection();
+  log('トリミング: 画像の上をドラッグして範囲を指定し、[適用] または Enter で確定します');
+}
+function clampToImage(x, y) {
+  const b = imageBox(cropTarget);
+  return { x: Math.min(Math.max(x, b.x), b.x + b.w), y: Math.min(Math.max(y, b.y), b.y + b.h) };
+}
+function beginCropDrag(p) {
+  const s = clampToImage(p.x, p.y);
+  drag = { mode: 'crop', ox: s.x, oy: s.y };
+  cropRect = { x: s.x, y: s.y, w: 0, h: 0 };
+}
+function updateCropRect(p, shift) {
+  const c = clampToImage(p.x, p.y);
+  let x2 = c.x, y2 = c.y;
+  if (shift) {                                   // 正方形に固定
+    const s = Math.min(Math.abs(x2 - drag.ox), Math.abs(y2 - drag.oy));
+    x2 = drag.ox + Math.sign(x2 - drag.ox || 1) * s;
+    y2 = drag.oy + Math.sign(y2 - drag.oy || 1) * s;
+  }
+  cropRect = { x: Math.min(drag.ox, x2), y: Math.min(drag.oy, y2),
+               w: Math.abs(x2 - drag.ox),  h: Math.abs(y2 - drag.oy) };
+}
+function renderCropUI(k) {
+  const b = imageBox(cropTarget);
+  const r = cropRect || b;
+  // 範囲外を暗くする 4 枚
+  [[b.x, b.y, b.w, r.y - b.y],
+   [b.x, r.y + r.h, b.w, b.y + b.h - (r.y + r.h)],
+   [b.x, r.y, r.x - b.x, r.h],
+   [r.x + r.w, r.y, b.x + b.w - (r.x + r.w), r.h]].forEach(([x, y, w, h]) => {
+    if (w <= 0 || h <= 0) return;
+    const m = document.createElementNS(NS, 'rect');
+    m.setAttribute('class', 'sel');
+    m.setAttribute('x', x); m.setAttribute('y', y);
+    m.setAttribute('width', w); m.setAttribute('height', h);
+    m.setAttribute('fill', 'rgba(15,27,40,0.55)');
+    overlay.appendChild(m);
+  });
+  const box = document.createElementNS(NS, 'rect');
+  box.setAttribute('class', 'sel');
+  box.setAttribute('x', r.x); box.setAttribute('y', r.y);
+  box.setAttribute('width', r.w); box.setAttribute('height', r.h);
+  box.setAttribute('fill', 'none');
+  box.setAttribute('stroke', '#ffffff');
+  box.setAttribute('stroke-width', 1.5 * k);
+  box.setAttribute('stroke-dasharray', `${5 * k} ${4 * k}`);
+  overlay.appendChild(box);
+}
+function finishCrop() {
+  cropTarget = null; cropRect = null;
+  $('cropActions').style.display  = 'none';
+  $('btnCropStart').style.display = '';
+  svg.setAttribute('class', 'tool-' + tool);
+  renderSelection();
+}
+function cancelCrop() {
+  if (!cropTarget) return;
+  finishCrop();
+  log('トリミングを中止しました');
+}
+/** 指定範囲を canvas で切り出し、画像そのものを差し替える（Ctrl+Z で戻せる） */
+async function applyCrop() {
+  const el = cropTarget, r = cropRect;
+  if (!el) return;
+  const b = imageBox(el);
+  if (!r || r.w < 1 || r.h < 1 || (Math.abs(r.w - b.w) < 0.5 && Math.abs(r.h - b.h) < 0.5)) {
+    log('トリミング範囲が指定されていません（変更しませんでした）');
+    cancelCrop();
+    return;
+  }
+  try {
+    const src = imageHref(el);
+    const img = await loadImage(src);
+    const sx = (r.x - b.x) / b.w * img.naturalWidth;
+    const sy = (r.y - b.y) / b.h * img.naturalHeight;
+    const sw = r.w / b.w * img.naturalWidth;
+    const sh = r.h / b.h * img.naturalHeight;
+    const cv = document.createElement('canvas');
+    cv.width  = Math.max(1, Math.round(sw));
+    cv.height = Math.max(1, Math.round(sh));
+    cv.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+    const mime = /^data:image\/jpeg/i.test(src) ? 'image/jpeg' : 'image/png';
+    setImageHref(el, cv.toDataURL(mime, 0.92));
+    el.setAttribute('x', r.x); el.setAttribute('y', r.y);
+    el.setAttribute('width', r.w); el.setAttribute('height', r.h);
+    el.dataset.naturalW = cv.width;
+    el.dataset.naturalH = cv.height;
+    finishCrop();
+    select(el);
+    pushHistory('トリミング');
+    log(`トリミングしました: 切り出し ${cv.width} × ${cv.height}px（Ctrl+Z で戻せます）`);
+  } catch (err) {
+    log(`トリミングに失敗しました: ${err.message}`, true);
+    cancelCrop();
+  }
+}
+$('btnCropStart').addEventListener('click', startCrop);
+$('btnCropApply').addEventListener('click', applyCrop);
+$('btnCropCancel').addEventListener('click', cancelCrop);
 
 /* -------------------------------------------------------- 編集コマンド */
 function deleteSelected() {
@@ -860,6 +1357,10 @@ $('btnBack').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (cropTarget) {                                  // トリミング中の確定 / 中止
+    if (e.key === 'Enter')  { e.preventDefault(); applyCrop();  return; }
+    if (e.key === 'Escape') { e.preventDefault(); cancelCrop(); return; }
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault(); e.shiftKey ? redo() : undo(); return;
   }
@@ -1051,6 +1552,45 @@ $('fileInput').addEventListener('change', (e) => {
   rd.readAsText(f, 'utf-8');
   e.target.value = '';
 });
+/** インライン SVG の <style> はスコープを持たずエディタ UI 全体に効いてしまうため取り除く。
+    @font-face は head に取り込み、inline=true なら通常のルールを各要素の style 属性へ展開する
+    （詳細度は考慮せず記述順で上書き。要素に元からある style が最優先）。
+    取り込んだ @font-face のファミリー名を返す */
+function absorbStyles(root, inline) {
+  const families = new Set();
+  const styles = [...root.querySelectorAll('style')];
+  if (!styles.length) return families;
+  const css   = styles.map(st => st.textContent).join('\n');
+  const faces = css.match(/@font-face\s*\{[\s\S]*?\}/g) || [];
+  if (faces.length) {
+    injectImportedFontFaces(faces.join('\n'));
+    for (const m of faces.join('\n').matchAll(/font-family:\s*['"]?([^;'"]+)['"]?\s*;/g)) {
+      families.add(m[1].trim());
+    }
+  }
+  let inlined = 0;
+  if (inline) {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(css.replace(/@font-face\s*\{[\s\S]*?\}/g, '').replace(/@import[^;]*;/g, ''));
+      const acc = new Map();
+      for (const r of sheet.cssRules) {
+        if (!(r instanceof CSSStyleRule)) continue;
+        let els;
+        try { els = root.querySelectorAll(r.selectorText); } catch (e) { continue; }
+        els.forEach(el => acc.set(el, (acc.get(el) || '') + r.style.cssText + ' '));
+      }
+      acc.forEach((decl, el) => { el.setAttribute('style', decl + (el.getAttribute('style') || '')); });
+      inlined = acc.size;
+    } catch (err) {
+      log(`<style> の展開に失敗しました: ${err.message}`, true);
+    }
+  }
+  if (inlined) log(`SVG の <style> を ${inlined} 要素の style 属性に展開しました`);
+  else if (!faces.length) log('SVG の <style> は破棄しました（UI 全体に影響するため）');
+  styles.forEach(st => st.remove());
+  return families;
+}
 function loadSVGText(text, name) {
   const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
   const err = doc.querySelector('parsererror');
@@ -1066,23 +1606,7 @@ function loadSVGText(text, name) {
   $('exportW').value = Math.round(w); $('exportH').value = Math.round(h);
   applyCanvasSize();
 
-  // インライン SVG の <style> はスコープを持たずエディタ UI 全体に効いてしまうため、
-  // @font-face だけを head に取り込み、それ以外の CSS は破棄する
-  const importedFamilies = new Set();
-  const styles = [...root.querySelectorAll('style')];
-  if (styles.length) {
-    const css   = styles.map(st => st.textContent).join('\n');
-    const faces = css.match(/@font-face\s*\{[\s\S]*?\}/g) || [];
-    if (faces.length) {
-      injectImportedFontFaces(faces.join('\n'));
-      for (const m of faces.join('\n').matchAll(/font-family:\s*['"]?([^;'"]+)['"]?\s*;/g)) {
-        importedFamilies.add(m[1].trim());
-      }
-    } else {
-      log('読み込んだ SVG の <style> は破棄しました（UI 全体に影響するため）');
-    }
-    styles.forEach(st => st.remove());
-  }
+  const importedFamilies = absorbStyles(root, false);
 
   layer.innerHTML = '';
   let count = 0;
@@ -1132,7 +1656,7 @@ const PERSIST_IDS = [
   'canvasW','canvasH','bgColor','bgTransparent','gridChk','snapChk','gridSize','zoom',
   'fillColor','fillNone','strokeColor','strokeNone','strokeWidth','rectRadius','dashStyle',
   'txtContent','fontFamily','fontSize','lineHeight','condense','letterSpacing','textFill',
-  'outlineColor','outlineWidth','boldChk','italicChk','textAnchor','hideMissing',
+  'outlineColor','outlineWidth','boldChk','italicChk','textAnchor','hideMissing','imgKeepAspect',
   'fileName','exportW','exportH','lockAspect','jpegQuality','embedFont'
 ];
 let storageOK = true;
@@ -1191,7 +1715,7 @@ function ensureWebFontsInLayer(skip) {
 function syncUidFromLayer() {
   let max = 0;
   layer.querySelectorAll('[id]').forEach(el => {
-    const m = /^(?:sh|tx)(\d+)$/.exec(el.id);
+    const m = /^(?:sh|tx|im)(\d+)$/.exec(el.id);
     if (m) max = Math.max(max, +m[1]);
   });
   uid = Math.max(uid, max);
@@ -1263,7 +1787,7 @@ syncLabels();
 pushHistory();
 refreshFontAvailability();
 log('SVG エディタを起動しました。ツールを選んでキャンバスをドラッグしてください。');
-log('ショートカット: V=選択 R=長方形 L=直線 T=テキスト / Delete=削除 / Ctrl+Z=元に戻す / Ctrl+D=複製 / Shift=45度・正方形');
+log('ショートカット: V=選択 R=長方形 L=直線 T=テキスト / Delete=削除 / Ctrl+Z=元に戻す / Ctrl+D=複製 / Ctrl+C・X・V=コピー・切り取り・貼り付け / Shift=45度・正方形');
 if (!storageOK) {
   $('autoSave').checked = false;
   $('autoSave').disabled = true;

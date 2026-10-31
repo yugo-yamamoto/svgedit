@@ -66,6 +66,8 @@ hr{border:none; border-top:1px solid var(--line); margin:9px 0}
 #canvas{display:block; touch-action:none}
 #canvas.tool-rect,#canvas.tool-line{cursor:crosshair}
 #canvas.tool-text{cursor:text}
+#canvas.tool-crop{cursor:crosshair}
+#secImage .row button{flex:1}
 
 .logsec{border-bottom:none}
 .logbox{
