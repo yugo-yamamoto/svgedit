@@ -1047,7 +1047,18 @@ function isEditable(t) {
   const tag = (t && t.tagName || '').toLowerCase();
   return tag === 'input' || tag === 'textarea' || tag === 'select' || !!(t && t.isContentEditable);
 }
+/** 非同期 Clipboard API で SVG 形式のデータを読む（初回は読み取り許可の確認が出る）。なければ null */
+async function readClipboardSVG() {
+  if (!navigator.clipboard || !navigator.clipboard.read) return null;
+  for (const it of await navigator.clipboard.read()) {
+    const t = SVG_TYPES.find(t => it.types.includes(t));
+    if (t) return { text: await (await it.getType(t)).text(), type: t };
+  }
+  return null;
+}
 /** Ctrl+V。SVG 型 → SVG ファイル → SVG ソースのテキスト / HTML → 画像 の順に探す。
+    Chrome は OS クリップボードの SVG 形式を paste イベントに渡さないため、
+    画像しか見えない（または何も見えない）ときは Clipboard API で SVG を読みにいく。
     テキスト入力中は文字の貼り付けを邪魔しない */
 window.addEventListener('paste', async (e) => {
   const cd = e.clipboardData;
@@ -1069,10 +1080,20 @@ window.addEventListener('paste', async (e) => {
     return;
   }
   const item = files.find(it => /^image\//.test(it.type));
-  if (!item) return;
+  if (!item && (cd.types.length || isEditable(e.target))) return;
   e.preventDefault();
+  const file = item && item.getAsFile();             // イベント処理後は読めなくなるので先に取り出す
+  if (!isEditable(e.target)) {
+    try {
+      const s = await readClipboardSVG();
+      if (s) { pasteSVGText(s.text, `${s.type} / Clipboard API`); return; }
+    } catch (err) {
+      log(`クリップボードの SVG を読めませんでした: ${err.message}${file ? '（画像として貼り付けます）' : ''}`, true);
+    }
+  }
+  if (!file) { log('クリップボードに SVG / 画像がありません', true); return; }
   try {
-    await insertImage(await readAsDataURL(item.getAsFile()), item.type);
+    await insertImage(await readAsDataURL(file), item.type);
   } catch (err) {
     log(`画像の貼り付けに失敗しました: ${err.message}`, true);
   }
@@ -1152,8 +1173,8 @@ async function svgToPNG(text, w, h, usage) {
 /** 選択要素を SVG 形式（image/svg+xml）でクリップボードへ書き込む。
     copy イベントの clipboardData.setData('image/svg+xml') はブラウザ内部の独自形式になり
     他のアプリからは SVG として見えないため、非同期 Clipboard API で書き込む。
-    本エディタへ Ctrl+V で貼り戻せるよう text/plain にも SVG ソースを入れ、
-    SVG を読めないアプリ向けに PNG も入れる */
+    SVG を読めないアプリ向けに PNG も入れる。text/plain を入れると Excel などが
+    テキストとして貼ってしまうため、SVG 形式を書けないブラウザでだけ SVG ソースをテキストで入れる */
 async function copySelected(cut) {
   if (!selected) { log(`${cut ? '切り取り' : 'コピー'}対象が選択されていません`); return; }
   const tag = selected.tagName;
@@ -1162,10 +1183,11 @@ async function copySelected(cut) {
     const usage = collectUsedWebFonts(selected);      // 切り取りで要素が消える前に集計しておく
     const canWrite = !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
     const supports = t => canWrite && (!ClipboardItem.supports || ClipboardItem.supports(t));
-    const data = { 'text/plain': new Blob([text], { type: 'text/plain' }) };
+    const data = {};
     if (supports('image/svg+xml')) data['image/svg+xml'] = new Blob([text], { type: 'image/svg+xml' });
     // PNG の生成は非同期。Promise のまま渡すとユーザー操作の直後に書き込みを始められる
     if (supports('image/png'))     data['image/png'] = svgToPNG(text, w, h, usage);
+    if (!data['image/svg+xml'])    data['text/plain'] = new Blob([text], { type: 'text/plain' });
     const types = Object.keys(data);
     if (canWrite) {
       await navigator.clipboard.write([new ClipboardItem(data)]);
