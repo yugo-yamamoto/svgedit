@@ -473,10 +473,15 @@ function topLevelOf(node) {
   }
   return n;
 }
+/** レイヤー座標での変換行列。グループ内の要素は親の transform も含める */
+function layerMatrixOf(el) {
+  const m = el.getCTM(), base = layer.getCTM();
+  return (m && base) ? base.inverse().multiply(m) : null;
+}
 function bboxOf(el) {
   let b;
   try { b = el.getBBox(); } catch (e) { return null; }
-  const m = el.transform.baseVal.consolidate() ? el.transform.baseVal.consolidate().matrix : null;
+  const m = layerMatrixOf(el);
   if (!m) return { x: b.x, y: b.y, width: b.width, height: b.height };
   const pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]]
     .map(([px, py]) => ({ x: m.a * px + m.c * py + m.e, y: m.b * px + m.d * py + m.f }));
@@ -514,6 +519,7 @@ function renderSelection() {
   box.setAttribute('stroke-width', 1 * k);
   box.setAttribute('stroke-dasharray', `${4 * k} ${3 * k}`);
   overlay.appendChild(box);
+  if (selected.parentNode !== layer) return;          // グループ内の要素は枠だけ（ハンドルはグループの座標系と合わない）
 
   const tag = selected.tagName.toLowerCase();
   if (tag === 'rect' || tag === 'image') {
@@ -859,11 +865,15 @@ function endDrag(evt) {
 }
 svg.addEventListener('pointerup', endDrag);
 svg.addEventListener('pointercancel', endDrag);
+/** ダブルクリックでテキストを編集。グループ（貼り付けた表など）の中のテキストも直接選択する */
 svg.addEventListener('dblclick', (evt) => {
-  const hit = topLevelOf(evt.target);
-  if (hit && hit.tagName.toLowerCase() === 'text') {
+  // ドラッグ開始時のポインターキャプチャで evt.target は svg になるため、座標から要素を探す
+  const hit = document.elementsFromPoint(evt.clientX, evt.clientY)
+    .map(n => n.closest && n.closest('text')).find(t => t && layer.contains(t));
+  if (hit) {
     select(hit); $('txtContent').focus(); $('txtContent').select();
-    log('テキスト編集: 左パネルの入力欄で編集してください');
+    log(hit.parentNode === layer ? 'テキスト編集: 左パネルの入力欄で編集してください'
+        : 'グループ内のテキストを選択しました: 左パネルの入力欄で編集してください（クリックでグループの選択に戻ります）');
   }
 });
 
@@ -1043,6 +1053,134 @@ function pasteSVGText(text, source) {
   return el;
 }
 
+/* ---- 表（Excel などの text/html の <table>）を図形に変換して貼り付け ---- */
+function hasHtmlTable(html) { return !!html && /<table[\s>]/i.test(html); }
+function isTransparent(c) { return !c || c === 'transparent' || /rgba\([^)]*,\s*0\)$/.test(c); }
+
+/** HTML の表を画面外の iframe で実際にレイアウトし、セルごとの位置と書式を読み取って
+    背景（rect）・罫線（line）・文字（text）からなる <g> を作る。
+    iframe はスクリプトを動かさず（sandbox）、表の <style> がエディタ UI に効かないよう隔離する */
+async function pasteHTMLTable(html, source) {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', 'allow-same-origin');
+  // visibility:hidden だと innerText が空になるため opacity で隠す
+  frame.style.cssText = 'position:fixed;left:-20000px;top:0;width:8000px;height:8000px;border:0;opacity:0;pointer-events:none';
+  const loaded = new Promise((res, rej) => {
+    frame.onload = res;
+    setTimeout(() => rej(new Error('表の読み込みがタイムアウトしました')), 5000);
+  });
+  frame.srcdoc = html;
+  document.body.appendChild(frame);
+  try {
+    await loaded;
+    const doc = frame.contentDocument, win = frame.contentWindow;
+    const table = doc.querySelector('table');
+    if (!table) throw new Error('表が見つかりません');
+    if (doc.fonts) await doc.fonts.ready;
+    const tb = table.getBoundingClientRect();
+    if (!tb.width || !tb.height) throw new Error('表の大きさを取得できません');
+
+    const r2 = v => Math.round(v * 100) / 100;
+    const bgs = [], borders = new Map(), texts = [];
+    let cells = 0;
+    for (const cell of table.querySelectorAll('td, th')) {
+      const r = cell.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      cells++;
+      const cs = win.getComputedStyle(cell);
+      const x = r.left - tb.left, y = r.top - tb.top, w = r.width, h = r.height;
+
+      if (!isTransparent(cs.backgroundColor)) {
+        const el = document.createElementNS(NS, 'rect');
+        [['x', x], ['y', y], ['width', w], ['height', h]].forEach(([k, v]) => el.setAttribute(k, r2(v)));
+        el.setAttribute('fill', toHex(cs.backgroundColor));
+        bgs.push(el);
+      }
+
+      // 罫線: 隣り合うセルで同じ線が重複するので座標で重複を除く
+      const edges = { top: [x, y, x + w, y], right: [x + w, y, x + w, y + h],
+                      bottom: [x, y + h, x + w, y + h], left: [x, y, x, y + h] };
+      for (const [side, [x1, y1, x2, y2]] of Object.entries(edges)) {
+        const bw = parseFloat(cs.getPropertyValue(`border-${side}-width`)) || 0;
+        const st = cs.getPropertyValue(`border-${side}-style`);
+        if (bw <= 0 || st === 'none' || st === 'hidden') continue;
+        const key = [x1, y1, x2, y2].map(v => Math.round(v * 2) / 2).join(',');
+        const el = document.createElementNS(NS, 'line');
+        [['x1', x1], ['y1', y1], ['x2', x2], ['y2', y2]].forEach(([k, v]) => el.setAttribute(k, r2(v)));
+        el.setAttribute('stroke', toHex(cs.getPropertyValue(`border-${side}-color`)));
+        el.setAttribute('stroke-width', r2(st === 'double' ? bw * 3 : bw));
+        if (st === 'dashed') el.setAttribute('stroke-dasharray', `${r2(bw * 3)} ${r2(bw * 2)}`);
+        if (st === 'dotted') el.setAttribute('stroke-dasharray', `${r2(bw)} ${r2(bw)}`);
+        el.setAttribute('stroke-linecap', 'square');
+        borders.set(key, el);
+      }
+
+      // 文字: 最初の文字の直前に幅 0 の目印を置いてベースラインを実測する
+      const content = cell.innerText.replace(/ /g, ' ').replace(/\s+$/, '');
+      if (!content.trim()) continue;
+      const walker = doc.createTreeWalker(cell, NodeFilter.SHOW_TEXT,
+        { acceptNode: n => n.data.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
+      const first = walker.nextNode();
+      if (!first) continue;
+      const mk = doc.createElement('span');
+      mk.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline';
+      first.parentNode.insertBefore(mk, first);
+      const baseline = mk.getBoundingClientRect().bottom - tb.top;
+      mk.remove();
+
+      const rg = doc.createRange();
+      rg.selectNodeContents(cell);
+      const rects = [...rg.getClientRects()].filter(q => q.width > 0 && q.height > 0);
+      const left  = Math.min(...rects.map(q => q.left))  - tb.left;
+      const right = Math.max(...rects.map(q => q.right)) - tb.left;
+      const ts = win.getComputedStyle(first.parentElement);
+      const size = parseFloat(ts.fontSize) || 16;
+      const tops = [...new Set(rects.map(q => Math.round(q.top)))].sort((a, b) => a - b);
+      const align = ts.textAlign;
+      const anchor = /center/.test(align) ? 'middle' : /right|end/.test(align) ? 'end' : 'start';
+      texts.push({
+        x: anchor === 'middle' ? (left + right) / 2 : anchor === 'end' ? right : left,
+        y: baseline,
+        p: {
+          content, family: ts.fontFamily, size: r2(size),
+          lineH: tops.length > 1 ? r2((tops[1] - tops[0]) / size) : 1.2,
+          condense: 1, ls: 0, fill: toHex(ts.color), oColor: '#ffffff', oWidth: 0,
+          bold: (+ts.fontWeight || 400) >= 600, italic: ts.fontStyle === 'italic', anchor
+        }
+      });
+    }
+    if (!cells) throw new Error('表にセルがありません');
+
+    const g = document.createElementNS(NS, 'g');
+    g.id = 'sh' + (++uid);
+    bgs.forEach(el => g.appendChild(el));
+    borders.forEach(el => g.appendChild(el));
+    layer.appendChild(g);
+    for (const t of texts) {
+      const el = document.createElementNS(NS, 'text');
+      el.setAttribute('x', r2(t.x)); el.setAttribute('y', r2(t.y));
+      el.id = 'tx' + (++uid);
+      g.appendChild(el);
+      applyTextStyle(el, t.p);
+      setTextLines(el, t.p.content);
+    }
+
+    const cw = +$('canvasW').value || 800, ch = +$('canvasH').value || 600;
+    const s = Math.min(1, (cw * 0.9) / tb.width, (ch * 0.9) / tb.height);
+    g.setAttribute('transform',
+      `translate(${r2((cw - tb.width * s) / 2)},${r2((ch - tb.height * s) / 2)}) scale(${+s.toPrecision(6)})`);
+
+    setTool('select');
+    select(g);
+    pushHistory('表を貼り付け');
+    log(`表を図形として貼り付けました（${source}）: セル ${cells} 個 / 文字 ${texts.length} 個 / 罫線 ${borders.size} 本 / ${Math.round(tb.width * s)} × ${Math.round(tb.height * s)}px（倍率 ${Math.round(s * 100)}%）`);
+    log('セルの文字はダブルクリックで選択し、左パネルで編集できます');
+    return g;
+  } finally {
+    frame.remove();
+  }
+}
+
 function isEditable(t) {
   const tag = (t && t.tagName || '').toLowerCase();
   return tag === 'input' || tag === 'textarea' || tag === 'select' || !!(t && t.isContentEditable);
@@ -1065,18 +1203,30 @@ window.addEventListener('paste', async (e) => {
   if (!cd) return;
   log(`貼り付け: 形式 [${[...cd.types].join(', ') || 'なし'}]`);
   const files = [...cd.items].filter(it => it.kind === 'file');
-  let svgText = null, svgFile = null, source = '';
+  let svgText = null, svgFile = null, source = '', tableHtml = null;
   if (!isEditable(e.target)) {
     const t = SVG_TYPES.find(t => cd.getData(t));
+    const html = cd.getData('text/html');
     if (t) { svgText = cd.getData(t); source = t; }
     else if ((svgFile = files.find(it => it.type === 'image/svg+xml'))) source = 'SVG ファイル';
     else if (SVG_TEXT_RE.test(cd.getData('text/plain'))) { svgText = cd.getData('text/plain'); source = 'SVG ソース'; }
-    else if ((svgText = svgFromHtml(cd.getData('text/html')))) source = 'HTML 内の SVG';
+    else if ((svgText = svgFromHtml(html))) source = 'HTML 内の SVG';
+    else if (hasHtmlTable(html)) tableHtml = html;     // Excel の表は画像より図形への変換を優先
   }
   if (svgText || svgFile) {
     e.preventDefault();
     try { pasteSVGText(svgText || await svgFile.getAsFile().text(), source); }
     catch (err) { log(`SVG の貼り付けに失敗しました: ${err.message}`, true); }
+    return;
+  }
+  if (tableHtml) {
+    e.preventDefault();
+    const file = (files.find(it => /^image\//.test(it.type)) || {}).getAsFile?.();
+    try { await pasteHTMLTable(tableHtml, 'text/html'); }
+    catch (err) {
+      log(`表の変換に失敗しました: ${err.message}${file ? '（画像として貼り付けます）' : ''}`, true);
+      if (file) await insertImage(await readAsDataURL(file), file.type).catch(e2 => log(`画像の貼り付けに失敗しました: ${e2.message}`, true));
+    }
     return;
   }
   const item = files.find(it => /^image\//.test(it.type));
@@ -1114,8 +1264,10 @@ $('btnPaste').addEventListener('click', async () => {
     for (const it of items) {
       const plain = await readText(it, 'text/plain');
       if (SVG_TEXT_RE.test(plain)) { pasteSVGText(plain, 'SVG ソース'); return; }
-      const fromHtml = svgFromHtml(await readText(it, 'text/html'));
+      const html = await readText(it, 'text/html');
+      const fromHtml = svgFromHtml(html);
       if (fromHtml) { pasteSVGText(fromHtml, 'HTML 内の SVG'); return; }
+      if (hasHtmlTable(html)) { await pasteHTMLTable(html, 'text/html'); return; }
     }
     for (const it of items) {
       const type = it.types.find(t => /^image\//.test(t));
@@ -1144,7 +1296,15 @@ function selectionToSVG() {
   out.setAttribute('height', h);
   out.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
   out.setAttribute('data-svgedit-copy', '1');   // 本エディタに貼り戻すとき元の位置付近に置く目印
-  out.appendChild(selected.cloneNode(true));
+  let node = selected.cloneNode(true);
+  if (selected.parentNode !== layer) {              // グループ内の要素は親の座標変換で包む
+    const m = layerMatrixOf(selected.parentNode);
+    const wrap = document.createElementNS(NS, 'g');
+    if (m) wrap.setAttribute('transform', `matrix(${m.a},${m.b},${m.c},${m.d},${m.e},${m.f})`);
+    wrap.appendChild(node);
+    node = wrap;
+  }
+  out.appendChild(node);
   return { text: new XMLSerializer().serializeToString(out), w, h };
 }
 /** SVG 文字列を等倍の PNG に変換する。<img> 経由では外部フォントを読めないため Web フォントは埋め込む */
@@ -1377,7 +1537,7 @@ function duplicateSelected() {
   if (!selected) { log('複製対象が選択されていません'); return; }
   const c = selected.cloneNode(true);
   c.id = (selected.tagName.toLowerCase() === 'text' ? 'tx' : 'sh') + (++uid);
-  layer.appendChild(c);
+  selected.parentNode.appendChild(c);                // グループ内の要素はグループ内に複製する
   moveBy(c, 12, 12);
   select(c);
   log('要素を複製しました'); pushHistory('複製');
@@ -1388,12 +1548,12 @@ $('btnUndo').addEventListener('click', undo);
 $('btnRedo').addEventListener('click', redo);
 $('btnFront').addEventListener('click', () => {
   if (!selected) return;
-  layer.appendChild(selected); renderSelection();
+  selected.parentNode.appendChild(selected); renderSelection();
   log('最前面へ移動'); pushHistory('重ね順変更');
 });
 $('btnBack').addEventListener('click', () => {
   if (!selected) return;
-  layer.insertBefore(selected, layer.firstChild); renderSelection();
+  selected.parentNode.insertBefore(selected, selected.parentNode.firstChild); renderSelection();
   log('最背面へ移動'); pushHistory('重ね順変更');
 });
 
